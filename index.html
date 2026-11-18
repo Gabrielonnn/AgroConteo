@@ -701,9 +701,9 @@
          * PERFILES DE RENDIMIENTO MÓVIL
          */
         const PERF_PROFILES = {
-            ultra: { sampleWidth: 256, minIntervalMs: 16, label: '256px • WebGL' },
-            balanced: { sampleWidth: 320, minIntervalMs: 24, label: '320px • WebGL' },
-            precision: { sampleWidth: 416, minIntervalMs: 32, label: '416px • WebGL' }
+            ultra: { sampleWidth: 512, minIntervalMs: 8, label: '512px • Multi-objeto' },
+            balanced: { sampleWidth: 640, minIntervalMs: 16, label: '640px • Multi-objeto' },
+            precision: { sampleWidth: 832, minIntervalMs: 24, label: '832px • Multi-objeto' }
         };
 
         /**
@@ -1014,6 +1014,76 @@
         }
 
         /**
+         * DETECCIÓN DENSa POR CUADRANTES.
+         * Divide cada fotograma en 4 zonas para que COCO-SSD vea aves pequeñas
+         * y aves muy juntas con mayor tamaño efectivo. Después une duplicados.
+         * Nota: el modelo COCO-SSD solo reconoce la clase genérica 'bird'.
+         */
+        const birdTileCanvas = document.createElement('canvas');
+        const birdTileCtx = birdTileCanvas.getContext('2d', { alpha: false });
+
+        function detectionIoU(a, b) {
+            const ax1 = a.bbox[0], ay1 = a.bbox[1];
+            const ax2 = ax1 + a.bbox[2], ay2 = ay1 + a.bbox[3];
+            const bx1 = b.bbox[0], by1 = b.bbox[1];
+            const bx2 = bx1 + b.bbox[2], by2 = by1 + b.bbox[3];
+            const iw = Math.max(0, Math.min(ax2, bx2) - Math.max(ax1, bx1));
+            const ih = Math.max(0, Math.min(ay2, by2) - Math.max(ay1, by1));
+            const inter = iw * ih;
+            const union = a.bbox[2] * a.bbox[3] + b.bbox[2] * b.bbox[3] - inter;
+            return union > 0 ? inter / union : 0;
+        }
+
+        function suppressDuplicateBirds(predictions, threshold = 0.38, limit = 140) {
+            predictions.sort((a, b) => b.score - a.score);
+            const kept = [];
+            for (const candidate of predictions) {
+                let duplicate = false;
+                for (const accepted of kept) {
+                    if (detectionIoU(candidate, accepted) > threshold) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) kept.push(candidate);
+                if (kept.length >= limit) break;
+            }
+            return kept;
+        }
+
+        async function detectBirdsInTiles(sourceCanvas, confidence) {
+            const width = sourceCanvas.width;
+            const height = sourceCanvas.height;
+            const tileW = Math.ceil(width / 2);
+            const tileH = Math.ceil(height / 2);
+            birdTileCanvas.width = tileW;
+            birdTileCanvas.height = tileH;
+            const allBirds = [];
+            const regions = [
+                [0, 0, tileW, tileH],
+                [tileW, 0, width - tileW, tileH],
+                [0, tileH, tileW, height - tileH],
+                [tileW, tileH, width - tileW, height - tileH]
+            ];
+
+            for (const [sx, sy, sw, sh] of regions) {
+                if (sw <= 0 || sh <= 0) continue;
+                birdTileCtx.clearRect(0, 0, tileW, tileH);
+                birdTileCtx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, tileW, tileH);
+                const predictions = await state.model.detect(birdTileCanvas, 35, confidence);
+                for (const prediction of predictions) {
+                    if (prediction.class !== 'bird') continue;
+                    const [x, y, w, h] = prediction.bbox;
+                    allBirds.push({
+                        ...prediction,
+                        bbox: [sx + x * (sw / tileW), sy + y * (sh / tileH), w * (sw / tileW), h * (sh / tileH)]
+                    });
+                }
+            }
+            return suppressDuplicateBirds(allBirds);
+        }
+
+        /**
          * CLASIFICACIÓN SIMULTÁNEA POR PROPORCIÓN Y COLORIMETRÍA OFFSCREEN
          */
         function classifyBirdsFromOffscreen(detections, offW, offH) {
@@ -1198,8 +1268,8 @@
                         track.category = det.category;
                     }
 
-                    // Auto-Sumar Únicos tras 3 frames confirmados para evitar falsos positivos
-                    if (state.mode === 'live' && state.autoAccumulateUnique && !track.countedUnique && track.seenFrames >= 3) {
+                    // Auto-Sumar Únicos tras 2 frames confirmados para reducir duplicados
+                    if (state.mode === 'live' && state.autoAccumulateUnique && !track.countedUnique && track.seenFrames >= 2) {
                         track.countedUnique = true;
                         incrementCategoryCount(track.category, 1);
                         playTone('tick');
@@ -1308,8 +1378,7 @@
 
                 dom.offscreenCtx.drawImage(dom.video, sx, sy, sw, sh, 0, 0, offW, offH);
 
-                const rawPredictions = await state.model.detect(dom.offscreenCanvas, 35, state.minConfidence);
-                const birdDetections = rawPredictions.filter(p => p.class === 'bird');
+                const birdDetections = await detectBirdsInTiles(dom.offscreenCanvas, state.minConfidence);
                 const classified = classifyBirdsFromOffscreen(birdDetections, offW, offH);
 
                 updateTrackerNormalized(classified);
@@ -1321,7 +1390,7 @@
             } finally {
                 state.isInferring = false;
                 const elapsed = performance.now() - tStart;
-                const waitMs = Math.max(4, PERF_PROFILES[state.perfProfile].minIntervalMs - elapsed);
+                const waitMs = Math.max(1, PERF_PROFILES[state.perfProfile].minIntervalMs - elapsed);
                 scheduleNextInference(waitMs);
             }
         }
@@ -1886,14 +1955,18 @@
                     audio: false,
                     video: {
                         facingMode: state.facingMode,
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
+                        width: { ideal: 960, max: 1280 },
+                        height: { ideal: 540, max: 720 },
                         frameRate: { ideal: 60, min: 30 }
                     }
                 });
 
                 state.stream = stream;
                 state.videoTrack = stream.getVideoTracks()[0] || null;
+                // Priorizar una captura fluida sin exigir resolución 720p a equipos modestos.
+                if (state.videoTrack && 'contentHint' in state.videoTrack) {
+                    state.videoTrack.contentHint = 'motion';
+                }
                 state.isSimulationMode = false;
                 dom.video.srcObject = stream;
                 await new Promise(res => { dom.video.onloadedmetadata = () => { dom.video.play(); res(); }; });
