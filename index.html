@@ -1,0 +1,1296 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AgroConteo - Contador Avícola IA</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Fuente Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <!-- TensorFlow.js y COCO-SSD para detección de aves -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+    <!-- Tone.js para retroalimentación sonora limpia sin URLs externas -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <!-- Phosphor Icons para iconografía clara -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+        /* Animación suave para marcadores táctiles */
+        @keyframes popIn {
+            0% { transform: translate(-50%, -50%) scale(0.3); opacity: 0; }
+            80% { transform: translate(-50%, -50%) scale(1.15); opacity: 1; }
+            100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+        }
+        .marker-pin {
+            animation: popIn 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        /* Ocultar scrollbar en contenedores horizontales */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-900 min-h-screen flex flex-col select-none">
+
+    <!-- Notificación Flotante (Reemplazo de alert) -->
+    <div id="toast" class="fixed top-4 left-1/2 -translate-x-1/2 z-50 hidden transition-all duration-300 max-w-[90vw]">
+        <div id="toast-content" class="bg-slate-900 text-white px-5 py-3 rounded-2xl shadow-2xl font-semibold text-sm flex items-center gap-2 border border-slate-700">
+            <i id="toast-icon" class="ph-fill ph-info text-amber-400 text-xl"></i>
+            <span id="toast-msg">Mensaje</span>
+        </div>
+    </div>
+
+    <!-- Modal de Confirmación Personalizado -->
+    <div id="confirm-modal" class="fixed inset-0 bg-black/70 z-50 hidden items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-200">
+            <h3 id="confirm-title" class="text-xl font-extrabold text-slate-900 mb-2">¿Estás seguro?</h3>
+            <p id="confirm-desc" class="text-slate-600 text-sm mb-6">Esta acción no se puede deshacer.</p>
+            <div class="flex gap-3">
+                <button id="confirm-cancel" class="flex-1 py-3 px-4 rounded-2xl bg-slate-200 text-slate-800 font-bold active:scale-95 transition">Cancelar</button>
+                <button id="confirm-ok" class="flex-1 py-3 px-4 rounded-2xl bg-red-600 text-white font-bold active:scale-95 transition">Confirmar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Encabezado y Total General -->
+    <header class="bg-slate-900 text-white px-4 py-3 shadow-lg sticky top-0 z-30">
+        <div class="max-w-2xl mx-auto flex items-center justify-between">
+            <div class="flex items-center gap-2.5">
+                <div class="bg-amber-500 text-slate-950 p-2 rounded-xl font-bold shadow">
+                    <i class="ph-fill ph-bird text-2xl"></i>
+                </div>
+                <div>
+                    <h1 class="font-extrabold text-lg leading-tight tracking-tight">AgroConteo</h1>
+                    <div class="flex items-center gap-1.5 text-xs text-slate-300">
+                        <span id="ai-status-dot" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                        <span id="ai-status-text">Cargando IA...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Total General Destacado -->
+            <div class="flex items-center gap-3">
+                <button id="sound-toggle" title="Activar/Desactivar sonido" class="p-2.5 rounded-xl bg-slate-800 text-amber-400 hover:bg-slate-700 active:scale-95 transition">
+                    <i id="sound-icon" class="ph-fill ph-speaker-high text-xl"></i>
+                </button>
+                <div class="bg-emerald-600 px-4 py-1.5 rounded-2xl text-right shadow-inner border border-emerald-400/30">
+                    <span class="block text-[10px] uppercase font-bold tracking-wider text-emerald-100">Total Aves</span>
+                    <span id="total-count" class="text-2xl font-black leading-none text-white">0</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Contenedor Principal -->
+    <main class="flex-1 max-w-2xl w-full mx-auto p-3 sm:p-4 flex flex-col gap-4 pb-24">
+
+        <!-- Visor de Cámara / Imagen y Canvas Superpuesto -->
+        <section class="bg-slate-950 rounded-3xl overflow-hidden shadow-xl border-2 border-slate-800 relative">
+            
+            <!-- Barra Superior del Visor: Modos de Operación -->
+            <div class="bg-slate-900/95 p-2 flex items-center justify-between gap-2 border-b border-slate-800">
+                <div class="flex bg-slate-800 p-1 rounded-xl w-full">
+                    <button id="mode-ai-btn" class="flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 bg-amber-500 text-slate-950 shadow transition">
+                        <i class="ph-bold ph-scan"></i>
+                        <span>IA en Vivo</span>
+                    </button>
+                    <button id="mode-manual-btn" class="flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 text-slate-300 hover:text-white transition">
+                        <i class="ph-bold ph-hand-tap"></i>
+                        <span>Toque Preciso</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Área Visual (Video + Imagen Estática + Canvas IA + Marcadores Táctiles) -->
+            <div id="viewport-container" class="relative w-full aspect-[4/3] sm:aspect-[16/10] bg-slate-900 flex items-center justify-center overflow-hidden cursor-crosshair">
+                
+                <!-- Estado Vacío / Bienvenida -->
+                <div id="empty-state" class="text-center p-6 flex flex-col items-center justify-center z-10">
+                    <div class="w-16 h-16 rounded-full bg-slate-800 text-amber-400 flex items-center justify-center mb-3 shadow-inner">
+                        <i class="ph-duotone ph-camera text-3xl"></i>
+                    </div>
+                    <p class="text-white font-bold text-base mb-1">Cámara inactiva</p>
+                    <p class="text-slate-400 text-xs max-w-xs mb-4">Enciende la cámara trasera para detectar aves en tiempo real o sube una foto del corral.</p>
+                    <div class="flex flex-wrap justify-center gap-2">
+                        <button id="start-cam-hero" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold px-5 py-3 rounded-2xl text-sm flex items-center gap-2 shadow-lg active:scale-95 transition">
+                            <i class="ph-bold ph-video-camera text-lg"></i>
+                            <span>Abrir Cámara</span>
+                        </button>
+                        <label class="bg-slate-800 hover:bg-slate-700 text-white font-bold px-4 py-3 rounded-2xl text-sm flex items-center gap-2 cursor-pointer border border-slate-700 active:scale-95 transition">
+                            <i class="ph-bold ph-image text-lg text-amber-400"></i>
+                            <span>Subir Foto</span>
+                            <input type="file" id="image-upload" accept="image/*" class="hidden">
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Video en Vivo -->
+                <video id="camera-video" class="hidden w-full h-full object-contain" playsinline muted autoplay></video>
+
+                <!-- Imagen Congelada o Subida -->
+                <img id="frozen-image" class="hidden w-full h-full object-contain pointer-events-none" alt="Captura del corral">
+
+                <!-- Canvas para Bounding Boxes de IA -->
+                <canvas id="ai-canvas" class="absolute inset-0 w-full h-full pointer-events-none z-10"></canvas>
+
+                <!-- Capa Interactiva para Marcadores Táctiles -->
+                <div id="markers-layer" class="absolute inset-0 w-full h-full z-20 overflow-hidden"></div>
+
+                <!-- Etiqueta flotante de estado del visor -->
+                <div id="live-badge" class="hidden absolute top-3 left-3 z-30 bg-black/75 backdrop-blur-md text-white px-3 py-1 rounded-full text-xs font-bold flex items-center gap-2 border border-white/15">
+                    <span class="w-2 h-2 rounded-full bg-red-500 animate-ping"></span>
+                    <span id="live-badge-text">EN VIVO • IA: 0 aves</span>
+                </div>
+
+                <!-- Botón cambiar cámara (Frontal/Trasera) -->
+                <button id="switch-cam-btn" class="hidden absolute top-3 right-3 z-30 bg-black/75 text-white p-2.5 rounded-full border border-white/20 active:scale-90 transition" title="Cambiar Cámara">
+                    <i class="ph-bold ph-camera-rotate text-xl"></i>
+                </button>
+            </div>
+
+            <!-- Barra de Controles Inferiores del Visor -->
+            <div id="camera-controls" class="bg-slate-900 p-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800">
+                
+                <!-- Controles cuando hay cámara activa -->
+                <div id="live-controls" class="hidden w-full flex items-center justify-between gap-2">
+                    <button id="stop-cam-btn" class="py-3 px-4 rounded-2xl bg-slate-800 text-red-400 font-bold text-xs sm:text-sm flex items-center gap-1.5 active:scale-95 transition">
+                        <i class="ph-bold ph-stop-circle text-lg"></i>
+                        <span>Detener</span>
+                    </button>
+
+                    <!-- Botón Principal: Capturar y Contar con IA -->
+                    <button id="capture-ai-btn" class="flex-1 py-3 px-4 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg active:scale-95 transition">
+                        <i class="ph-bold ph-aperture text-xl"></i>
+                        <span>Capturar y Contar (<span id="live-detect-count">0</span>)</span>
+                    </button>
+                </div>
+
+                <!-- Controles cuando hay imagen congelada o subida (Modo Edición / Toque) -->
+                <div id="frozen-controls" class="hidden w-full flex items-center justify-between gap-2">
+                    <button id="resume-cam-btn" class="py-2.5 px-3.5 rounded-2xl bg-slate-800 text-amber-400 font-bold text-xs sm:text-sm flex items-center gap-1.5 active:scale-95 transition">
+                        <i class="ph-bold ph-arrow-counter-clockwise text-lg"></i>
+                        <span>Volver a Cámara</span>
+                    </button>
+
+                    <div class="flex items-center gap-2">
+                        <button id="undo-point-btn" class="py-2.5 px-3.5 rounded-2xl bg-slate-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 active:scale-95 transition" title="Deshacer último punto">
+                            <i class="ph-bold ph-arrow-u-up-left text-lg"></i>
+                            <span>Deshacer</span>
+                        </button>
+                        <button id="clear-points-btn" class="py-2.5 px-3.5 rounded-2xl bg-red-950/80 text-red-300 border border-red-800/50 font-bold text-xs sm:text-sm flex items-center gap-1.5 active:scale-95 transition" title="Borrar todos los puntos">
+                            <i class="ph-bold ph-trash text-lg"></i>
+                            <span>Limpiar</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Barra rápida cuando está inactivo -->
+                <div id="idle-controls" class="w-full flex items-center justify-between gap-2">
+                    <button id="start-cam-bar" class="flex-1 py-2.5 px-4 rounded-2xl bg-amber-500 text-slate-950 font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 active:scale-95 transition">
+                        <i class="ph-bold ph-camera text-lg"></i>
+                        <span>Iniciar Cámara</span>
+                    </button>
+                    <label class="py-2.5 px-4 rounded-2xl bg-slate-800 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 cursor-pointer active:scale-95 transition">
+                        <i class="ph-bold ph-upload-simple text-lg text-amber-400"></i>
+                        <span>Galería</span>
+                        <input type="file" id="image-upload-bar" accept="image/*" class="hidden">
+                    </label>
+                </div>
+            </div>
+        </section>
+
+        <!-- Instrucción Contextual de Toque -->
+        <div id="touch-helper-banner" class="bg-amber-100 border-l-4 border-amber-500 text-amber-950 px-4 py-2.5 rounded-r-2xl text-xs font-semibold flex items-center justify-between shadow-sm">
+            <div class="flex items-center gap-2">
+                <i class="ph-fill ph-hand-pointing text-lg text-amber-600"></i>
+                <span>Selecciona una categoría abajo y toca sobre la imagen para marcar cada ave.</span>
+            </div>
+            <span id="active-category-pill" class="bg-amber-500 text-slate-950 px-2.5 py-0.5 rounded-full font-extrabold uppercase text-[10px]">Gallina</span>
+        </div>
+
+        <!-- Panel de Contadores por Categoría (Optimizado para una mano y alto contraste) -->
+        <section class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            
+            <!-- Tarjeta: GALLINAS -->
+            <div id="card-gallinas" data-category="gallinas" class="category-card bg-white rounded-3xl p-4 shadow-md border-4 border-amber-500 transition cursor-pointer relative overflow-hidden">
+                <div class="flex sm:flex-col items-center justify-between gap-3">
+                    <!-- Info Categoría -->
+                    <div class="flex items-center sm:flex-col sm:text-center gap-3 sm:gap-1">
+                        <div class="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center text-2xl font-bold shadow-inner">
+                            🐔
+                        </div>
+                        <div>
+                            <h2 class="font-extrabold text-lg text-slate-900 leading-tight">Gallinas</h2>
+                            <span class="text-[11px] font-bold text-amber-700 uppercase tracking-wider">Ponedoras / Adultas</span>
+                        </div>
+                    </div>
+
+                    <!-- Controles + y - -->
+                    <div class="flex items-center gap-3">
+                        <button type="button" onclick="adjustCount(event, 'gallinas', -1)" class="w-12 h-12 rounded-2xl bg-slate-200 hover:bg-slate-300 text-slate-900 font-black text-2xl flex items-center justify-center active:scale-90 transition shadow-sm" aria-label="Restar Gallina">
+                            -
+                        </button>
+                        <span id="count-gallinas" class="w-12 text-center font-black text-3xl text-slate-900 tabular-nums">0</span>
+                        <button type="button" onclick="adjustCount(event, 'gallinas', 1)" class="w-12 h-12 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-2xl flex items-center justify-center active:scale-90 transition shadow-md" aria-label="Sumar Gallina">
+                            +
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tarjeta: GALLOS -->
+            <div id="card-gallos" data-category="gallos" class="category-card bg-white rounded-3xl p-4 shadow-md border-4 border-transparent hover:border-red-200 transition cursor-pointer relative overflow-hidden">
+                <div class="flex sm:flex-col items-center justify-between gap-3">
+                    <div class="flex items-center sm:flex-col sm:text-center gap-3 sm:gap-1">
+                        <div class="w-12 h-12 rounded-2xl bg-red-100 text-red-700 flex items-center justify-center text-2xl font-bold shadow-inner">
+                            🐓
+                        </div>
+                        <div>
+                            <h2 class="font-extrabold text-lg text-slate-900 leading-tight">Gallos</h2>
+                            <span class="text-[11px] font-bold text-red-700 uppercase tracking-wider">Reproductores</span>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center gap-3">
+                        <button type="button" onclick="adjustCount(event, 'gallos', -1)" class="w-12 h-12 rounded-2xl bg-slate-200 hover:bg-slate-300 text-slate-900 font-black text-2xl flex items-center justify-center active:scale-90 transition shadow-sm" aria-label="Restar Gallo">
+                            -
+                        </button>
+                        <span id="count-gallos" class="w-12 text-center font-black text-3xl text-slate-900 tabular-nums">0</span>
+                        <button type="button" onclick="adjustCount(event, 'gallos', 1)" class="w-12 h-12 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-black text-2xl flex items-center justify-center active:scale-90 transition shadow-md" aria-label="Sumar Gallo">
+                            +
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tarjeta: POLLITOS -->
+            <div id="card-pollitos" data-category="pollitos" class="category-card bg-white rounded-3xl p-4 shadow-md border-4 border-transparent hover:border-sky-200 transition cursor-pointer relative overflow-hidden">
+                <div class="flex sm:flex-col items-center justify-between gap-3">
+                    <div class="flex items-center sm:flex-col sm:text-center gap-3 sm:gap-1">
+                        <div class="w-12 h-12 rounded-2xl bg-sky-100 text-sky-700 flex items-center justify-center text-2xl font-bold shadow-inner">
+                            🐤
+                        </div>
+                        <div>
+                            <h2 class="font-extrabold text-lg text-slate-900 leading-tight">Pollitos</h2>
+                            <span class="text-[11px] font-bold text-sky-700 uppercase tracking-wider">Crías / Levante</span>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center gap-3">
+                        <button type="button" onclick="adjustCount(event, 'pollitos', -1)" class="w-12 h-12 rounded-2xl bg-slate-200 hover:bg-slate-300 text-slate-900 font-black text-2xl flex items-center justify-center active:scale-90 transition shadow-sm" aria-label="Restar Pollito">
+                            -
+                        </button>
+                        <span id="count-pollitos" class="w-12 text-center font-black text-3xl text-slate-900 tabular-nums">0</span>
+                        <button type="button" onclick="adjustCount(event, 'pollitos', 1)" class="w-12 h-12 rounded-2xl bg-sky-500 hover:bg-sky-400 text-white font-black text-2xl flex items-center justify-center active:scale-90 transition shadow-md" aria-label="Sumar Pollito">
+                            +
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- Formulario Rápido para Guardar Registro -->
+        <section class="bg-white rounded-3xl p-4 shadow-md border border-slate-200 flex flex-col gap-3">
+            <div class="flex items-center justify-between">
+                <h3 class="font-extrabold text-slate-800 text-sm uppercase tracking-wider flex items-center gap-1.5">
+                    <i class="ph-fill ph-floppy-disk text-emerald-600 text-lg"></i>
+                    <span>Guardar Conteo Actual</span>
+                </h3>
+                <button id="reset-all-btn" class="text-xs font-bold text-red-600 hover:underline px-2 py-1">
+                    Reiniciar a 0
+                </button>
+            </div>
+            
+            <div class="flex flex-col sm:flex-row gap-2">
+                <input type="text" id="record-note" placeholder="Nota opcional (ej. Corral Norte, Galpón 2...)" class="flex-1 bg-slate-100 border border-slate-300 rounded-2xl px-4 py-3 text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500">
+                <button id="save-record-btn" class="bg-slate-900 hover:bg-slate-800 text-white font-extrabold px-6 py-3 rounded-2xl text-sm flex items-center justify-center gap-2 shadow-md active:scale-95 transition">
+                    <i class="ph-bold ph-check-circle text-emerald-400 text-lg"></i>
+                    <span>Guardar Registro</span>
+                </button>
+            </div>
+        </section>
+
+        <!-- Historial de Registros y Exportación -->
+        <section class="bg-white rounded-3xl p-4 shadow-md border border-slate-200 flex flex-col gap-3">
+            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                <div>
+                    <h3 class="font-extrabold text-slate-900 text-base flex items-center gap-2">
+                        <i class="ph-fill ph-clock-counter-clockwise text-amber-500 text-xl"></i>
+                        <span>Historial de Conteos</span>
+                    </h3>
+                    <p class="text-xs text-slate-500">Guardado localmente en este teléfono</p>
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <button id="share-whatsapp-btn" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 active:scale-95 transition">
+                        <i class="ph-fill ph-whatsapp-logo text-emerald-600 text-base"></i>
+                        <span>Copiar / WhatsApp</span>
+                    </button>
+                    <button id="export-csv-btn" class="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 active:scale-95 transition">
+                        <i class="ph-bold ph-file-csv text-slate-600 text-base"></i>
+                        <span>CSV</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Lista de Registros -->
+            <div id="history-list" class="flex flex-col gap-2.5 max-h-80 overflow-y-auto pr-1">
+                <!-- Se llena dinámicamente con JS -->
+                <div class="text-center py-6 text-slate-400 text-sm">
+                    Aún no hay conteos guardados.
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Lógica Completa de la Aplicación -->
+    <script>
+        /**
+         * ESTADO GLOBAL DE LA APLICACIÓN
+         */
+        const state = {
+            counts: {
+                gallinas: 0,
+                gallos: 0,
+                pollitos: 0
+            },
+            activeCategory: 'gallinas', // 'gallinas' | 'gallos' | 'pollitos'
+            mode: 'ai', // 'ai' | 'manual'
+            isCameraActive: false,
+            isFrozen: false,
+            facingMode: 'environment', // Cámara trasera por defecto
+            stream: null,
+            model: null,
+            isModelLoaded: false,
+            aiAnimationFrame: null,
+            lastDetections: [], // Detecciones actuales de COCO-SSD
+            markers: [], // Marcadores táctiles: { id, xPercent, yPercent, category, number }
+            soundEnabled: true,
+            history: []
+        };
+
+        // Configuración visual por categoría
+        const CATEGORY_CONFIG = {
+            gallinas: {
+                label: 'Gallina',
+                plural: 'Gallinas',
+                colorBg: 'bg-amber-500',
+                colorText: 'text-slate-950',
+                borderColor: 'border-amber-500',
+                hex: '#f59e0b',
+                emoji: '🐔'
+            },
+            gallos: {
+                label: 'Gallo',
+                plural: 'Gallos',
+                colorBg: 'bg-red-600',
+                colorText: 'text-white',
+                borderColor: 'border-red-600',
+                hex: '#dc2626',
+                emoji: '🐓'
+            },
+            pollitos: {
+                label: 'Pollito',
+                plural: 'Pollitos',
+                colorBg: 'bg-sky-500',
+                colorText: 'text-white',
+                borderColor: 'border-sky-500',
+                hex: '#0ea5e9',
+                emoji: '🐤'
+            }
+        };
+
+        /**
+         * REFERENCIAS AL DOM
+         */
+        const dom = {
+            video: document.getElementById('camera-video'),
+            frozenImg: document.getElementById('frozen-image'),
+            aiCanvas: document.getElementById('ai-canvas'),
+            markersLayer: document.getElementById('markers-layer'),
+            viewport: document.getElementById('viewport-container'),
+            emptyState: document.getElementById('empty-state'),
+            liveBadge: document.getElementById('live-badge'),
+            liveBadgeText: document.getElementById('live-badge-text'),
+            liveDetectCount: document.getElementById('live-detect-count'),
+            switchCamBtn: document.getElementById('switch-cam-btn'),
+            
+            // Controles inferiores
+            liveControls: document.getElementById('live-controls'),
+            frozenControls: document.getElementById('frozen-controls'),
+            idleControls: document.getElementById('idle-controls'),
+
+            // Botones de modo
+            modeAiBtn: document.getElementById('mode-ai-btn'),
+            modeManualBtn: document.getElementById('mode-manual-btn'),
+
+            // Estado IA
+            aiStatusDot: document.getElementById('ai-status-dot'),
+            aiStatusText: document.getElementById('ai-status-text'),
+
+            // Contadores
+            totalCount: document.getElementById('total-count'),
+            countGallinas: document.getElementById('count-gallinas'),
+            countGallos: document.getElementById('count-gallos'),
+            countPollitos: document.getElementById('count-pollitos'),
+            activeCategoryPill: document.getElementById('active-category-pill'),
+
+            // Historial
+            historyList: document.getElementById('history-list'),
+            recordNote: document.getElementById('record-note')
+        };
+
+        /**
+         * SINTETIZADOR DE SONIDO (Tone.js)
+         */
+        let synth = null;
+        function playFeedbackSound(type = 'add') {
+            if (!state.soundEnabled) return;
+            try {
+                if (!synth && typeof Tone !== 'undefined') {
+                    synth = new Tone.Synth({
+                        oscillator: { type: 'sine' },
+                        envelope: { attack: 0.005, decay: 0.08, sustain: 0, release: 0.05 }
+                    }).toDestination();
+                }
+                if (synth) {
+                    if (Tone.context.state !== 'running') Tone.start();
+                    if (type === 'add') synth.triggerAttackRelease('C6', '32n');
+                    else if (type === 'remove') synth.triggerAttackRelease('G4', '32n');
+                    else if (type === 'capture') synth.triggerAttackRelease('E6', '16n');
+                }
+            } catch (e) {
+                console.warn('Audio no disponible:', e);
+            }
+        }
+
+        /**
+         * SISTEMA DE NOTIFICACIONES TOAST Y MODAL
+         */
+        let toastTimeout;
+        function showToast(message, iconClass = 'ph-info text-amber-400') {
+            const toast = document.getElementById('toast');
+            const msgEl = document.getElementById('toast-msg');
+            const iconEl = document.getElementById('toast-icon');
+            
+            msgEl.textContent = message;
+            iconEl.className = `ph-fill ${iconClass} text-xl`;
+            toast.classList.remove('hidden');
+            
+            clearTimeout(toastTimeout);
+            toastTimeout = setTimeout(() => {
+                toast.classList.add('hidden');
+            }, 3000);
+        }
+
+        function showConfirm(title, desc, onConfirm) {
+            const modal = document.getElementById('confirm-modal');
+            document.getElementById('confirm-title').textContent = title;
+            document.getElementById('confirm-desc').textContent = desc;
+            
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+
+            const close = () => {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            };
+
+            document.getElementById('confirm-cancel').onclick = close;
+            document.getElementById('confirm-ok').onclick = () => {
+                close();
+                onConfirm();
+            };
+        }
+
+        /**
+         * INICIALIZACIÓN DEL MODELO DE IA (COCO-SSD)
+         */
+        async function loadAIModel() {
+            try {
+                state.model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+                state.isModelLoaded = true;
+                dom.aiStatusDot.className = 'w-2 h-2 rounded-full bg-emerald-400';
+                dom.aiStatusText.textContent = 'IA Lista (COCO-SSD)';
+            } catch (error) {
+                console.error('Error cargando COCO-SSD:', error);
+                dom.aiStatusDot.className = 'w-2 h-2 rounded-full bg-red-500';
+                dom.aiStatusText.textContent = 'Modo Manual (Sin IA)';
+                showToast('No se pudo cargar la IA. Puedes usar el conteo manual.', 'ph-warning text-red-400');
+            }
+        }
+
+        /**
+         * GESTIÓN DE CÁMARA Y SUBIDA DE IMÁGENES
+         */
+        async function startCamera() {
+            try {
+                stopCameraStreamOnly();
+                
+                const constraints = {
+                    audio: false,
+                    video: {
+                        facingMode: state.facingMode,
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    }
+                };
+
+                state.stream = await navigator.mediaDevices.getUserMedia(constraints);
+                dom.video.srcObject = state.stream;
+                
+                await new Promise((resolve) => {
+                    dom.video.onloadedmetadata = () => {
+                        dom.video.play();
+                        resolve();
+                    };
+                });
+
+                state.isCameraActive = true;
+                state.isFrozen = false;
+                clearMarkers();
+
+                // Actualizar interfaz del visor
+                dom.emptyState.classList.add('hidden');
+                dom.frozenImg.classList.add('hidden');
+                dom.video.classList.remove('hidden');
+                dom.liveBadge.classList.remove('hidden');
+                dom.switchCamBtn.classList.remove('hidden');
+
+                dom.idleControls.classList.add('hidden');
+                dom.frozenControls.classList.add('hidden');
+                dom.liveControls.classList.remove('hidden');
+
+                resizeCanvas();
+                if (state.mode === 'ai' && state.isModelLoaded) {
+                    detectFrameLoop();
+                }
+            } catch (err) {
+                console.error('Error accediendo a la cámara:', err);
+                showToast('Permiso de cámara denegado o no disponible. Sube una foto.', 'ph-camera-slash text-red-400');
+            }
+        }
+
+        function stopCameraStreamOnly() {
+            if (state.aiAnimationFrame) {
+                cancelAnimationFrame(state.aiAnimationFrame);
+                state.aiAnimationFrame = null;
+            }
+            if (state.stream) {
+                state.stream.getTracks().forEach(track => track.stop());
+                state.stream = null;
+            }
+            state.isCameraActive = false;
+        }
+
+        function stopCameraCompletely() {
+            stopCameraStreamOnly();
+            state.isFrozen = false;
+            clearCanvas();
+            clearMarkers();
+
+            dom.video.classList.add('hidden');
+            dom.frozenImg.classList.add('hidden');
+            dom.liveBadge.classList.add('hidden');
+            dom.switchCamBtn.classList.add('hidden');
+            dom.emptyState.classList.remove('hidden');
+
+            dom.liveControls.classList.add('hidden');
+            dom.frozenControls.classList.add('hidden');
+            dom.idleControls.classList.remove('hidden');
+        }
+
+        function switchCamera() {
+            state.facingMode = state.facingMode === 'environment' ? 'user' : 'environment';
+            startCamera();
+        }
+
+        // Subir foto desde galería
+        function handleImageUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                stopCameraStreamOnly();
+                clearCanvas();
+                clearMarkers();
+
+                dom.frozenImg.src = e.target.result;
+                dom.frozenImg.onload = async () => {
+                    state.isFrozen = true;
+                    dom.emptyState.classList.add('hidden');
+                    dom.video.classList.add('hidden');
+                    dom.liveBadge.classList.add('hidden');
+                    dom.switchCamBtn.classList.add('hidden');
+                    dom.frozenImg.classList.remove('hidden');
+
+                    dom.idleControls.classList.add('hidden');
+                    dom.liveControls.classList.add('hidden');
+                    dom.frozenControls.classList.remove('hidden');
+
+                    resizeCanvas();
+
+                    // Si está en modo IA, analizar automáticamente la foto subida
+                    if (state.mode === 'ai' && state.isModelLoaded) {
+                        showToast('Analizando aves en la imagen...', 'ph-sparkle text-amber-400');
+                        await detectStaticImage(dom.frozenImg);
+                    } else {
+                        showToast('Toca sobre cada ave en la foto para contarla', 'ph-hand-tap text-amber-400');
+                    }
+                };
+            };
+            reader.readAsDataURL(file);
+            event.target.value = ''; // Permitir subir la misma imagen de nuevo
+        }
+
+        /**
+         * DETECCIÓN POR INTELIGENCIA ARTIFICIAL (COCO-SSD)
+         */
+        function resizeCanvas() {
+            const rect = dom.viewport.getBoundingClientRect();
+            dom.aiCanvas.width = rect.width;
+            dom.aiCanvas.height = rect.height;
+        }
+
+        function clearCanvas() {
+            const ctx = dom.aiCanvas.getContext('2d');
+            ctx.clearRect(0, 0, dom.aiCanvas.width, dom.aiCanvas.height);
+        }
+
+        // Calcula el área real renderizada (object-contain) para alinear los cuadros delimitadores
+        function getRenderedMediaBounds(mediaWidth, mediaHeight) {
+            const containerW = dom.aiCanvas.width;
+            const containerH = dom.aiCanvas.height;
+            const mediaRatio = mediaWidth / mediaHeight;
+            const containerRatio = containerW / containerH;
+
+            let renderW, renderH, offsetX, offsetY;
+            if (mediaRatio > containerRatio) {
+                renderW = containerW;
+                renderH = containerW / mediaRatio;
+                offsetX = 0;
+                offsetY = (containerH - renderH) / 2;
+            } else {
+                renderH = containerH;
+                renderW = containerH * mediaRatio;
+                offsetX = (containerW - renderW) / 2;
+                offsetY = 0;
+            }
+            return { renderW, renderH, offsetX, offsetY };
+        }
+
+        async function detectFrameLoop() {
+            if (!state.isCameraActive || state.isFrozen || state.mode !== 'ai' || !state.isModelLoaded) {
+                return;
+            }
+
+            if (dom.video.readyState === 4) {
+                try {
+                    // Umbral de confianza 0.35 para captar aves en corral a media distancia
+                    const predictions = await state.model.detect(dom.video, 30, 0.35);
+                    // Filtrar clase 'bird' (aves)
+                    const birds = predictions.filter(p => p.class === 'bird');
+                    state.lastDetections = birds;
+
+                    dom.liveBadgeText.textContent = `EN VIVO • IA: ${birds.length} ${birds.length === 1 ? 'ave' : 'aves'}`;
+                    dom.liveDetectCount.textContent = birds.length;
+
+                    drawDetections(birds, dom.video.videoWidth, dom.video.videoHeight);
+                } catch (err) {
+                    console.warn('Frame omitido en IA:', err);
+                }
+            }
+
+            state.aiAnimationFrame = requestAnimationFrame(detectFrameLoop);
+        }
+
+        function drawDetections(birds, sourceW, sourceH) {
+            const ctx = dom.aiCanvas.getContext('2d');
+            ctx.clearRect(0, 0, dom.aiCanvas.width, dom.aiCanvas.height);
+
+            if (!sourceW || !sourceH) return;
+            const { renderW, renderH, offsetX, offsetY } = getRenderedMediaBounds(sourceW, sourceH);
+            const scaleX = renderW / sourceW;
+            const scaleY = renderH / sourceH;
+
+            birds.forEach((bird, idx) => {
+                const [x, y, w, h] = bird.bbox;
+                const drawX = offsetX + x * scaleX;
+                const drawY = offsetY + y * scaleY;
+                const drawW = w * scaleX;
+                const drawH = h * scaleY;
+
+                // Caja delimitadora de alto contraste
+                ctx.strokeStyle = '#10b981'; // Esmeralda brillante
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.roundRect(drawX, drawY, drawW, drawH, 8);
+                ctx.stroke();
+
+                // Etiqueta superior
+                const label = `Ave #${idx + 1} (${Math.round(bird.score * 100)}%)`;
+                ctx.font = 'bold 12px Inter, sans-serif';
+                const textWidth = ctx.measureText(label).width;
+
+                ctx.fillStyle = '#10b981';
+                ctx.fillRect(drawX, Math.max(0, drawY - 22), textWidth + 12, 22);
+
+                ctx.fillStyle = '#022c22';
+                ctx.fillText(label, drawX + 6, Math.max(15, drawY - 7));
+            });
+        }
+
+        // Congelar fotograma actual y convertir detecciones IA en marcadores editables
+        async function captureAndCountAI() {
+            if (!state.isCameraActive) return;
+
+            playFeedbackSound('capture');
+
+            // Capturar fotograma del video en un canvas temporal
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = dom.video.videoWidth;
+            tempCanvas.height = dom.video.videoHeight;
+            const tCtx = tempCanvas.getContext('2d');
+            tCtx.drawImage(dom.video, 0, 0, tempCanvas.width, tempCanvas.height);
+
+            const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.92);
+            
+            // Detener loop en vivo y mostrar imagen congelada
+            stopCameraStreamOnly();
+            clearCanvas();
+
+            dom.frozenImg.src = dataUrl;
+            state.isFrozen = true;
+
+            dom.video.classList.add('hidden');
+            dom.liveBadge.classList.add('hidden');
+            dom.switchCamBtn.classList.add('hidden');
+            dom.frozenImg.classList.remove('hidden');
+
+            dom.liveControls.classList.add('hidden');
+            dom.frozenControls.classList.remove('hidden');
+
+            // Convertir detecciones actuales en marcadores táctiles de la categoría activa
+            const detections = state.lastDetections;
+            if (detections.length > 0) {
+                const { renderW, renderH, offsetX, offsetY } = getRenderedMediaBounds(tempCanvas.width, tempCanvas.height);
+                const scaleX = renderW / tempCanvas.width;
+                const scaleY = renderH / tempCanvas.height;
+
+                detections.forEach(bird => {
+                    const [x, y, w, h] = bird.bbox;
+                    const centerX = offsetX + (x + w / 2) * scaleX;
+                    const centerY = offsetY + (y + h / 2) * scaleY;
+
+                    const xPercent = (centerX / dom.aiCanvas.width) * 100;
+                    const yPercent = (centerY / dom.aiCanvas.height) * 100;
+
+                    addMarkerAtPercent(xPercent, yPercent, state.activeCategory, false);
+                });
+
+                updateCountersUI();
+                showToast(`¡${detections.length} aves detectadas! Toca para agregar o corregir.`, 'ph-check-circle text-emerald-400');
+            } else {
+                showToast('Fotograma capturado. Toca sobre cada ave para contarla.', 'ph-hand-tap text-amber-400');
+            }
+        }
+
+        // Detectar aves en una foto subida desde galería
+        async function detectStaticImage(imgElement) {
+            try {
+                const predictions = await state.model.detect(imgElement, 40, 0.32);
+                const birds = predictions.filter(p => p.class === 'bird');
+                
+                if (birds.length > 0) {
+                    const { renderW, renderH, offsetX, offsetY } = getRenderedMediaBounds(imgElement.naturalWidth, imgElement.naturalHeight);
+                    const scaleX = renderW / imgElement.naturalWidth;
+                    const scaleY = renderH / imgElement.naturalHeight;
+
+                    birds.forEach(bird => {
+                        const [x, y, w, h] = bird.bbox;
+                        const centerX = offsetX + (x + w / 2) * scaleX;
+                        const centerY = offsetY + (y + h / 2) * scaleY;
+
+                        const xPercent = (centerX / dom.aiCanvas.width) * 100;
+                        const yPercent = (centerY / dom.aiCanvas.height) * 100;
+
+                        addMarkerAtPercent(xPercent, yPercent, state.activeCategory, false);
+                    });
+
+                    updateCountersUI();
+                    playFeedbackSound('capture');
+                    showToast(`IA detectó ${birds.length} aves. Puedes ajustar tocando la foto.`, 'ph-sparkle text-emerald-400');
+                } else {
+                    showToast('No se detectaron aves automáticamente. Toca cada ave en la foto.', 'ph-info text-amber-400');
+                }
+            } catch (err) {
+                console.error('Error analizando foto:', err);
+            }
+        }
+
+        /**
+         * CONTEO TÁCTIL SOBRE IMAGEN / VIDEO (MODO PRECISO)
+         */
+        dom.markersLayer.addEventListener('click', (e) => {
+            // Solo permitir colocar puntos si hay imagen congelada o video activo
+            if (!state.isCameraActive && !state.isFrozen) return;
+
+            // Si el video está en vivo y el usuario toca, pausamos automáticamente el fotograma para marcar con precisión
+            if (state.isCameraActive && !state.isFrozen) {
+                freezeVideoForManualCounting();
+            }
+
+            const rect = dom.markersLayer.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const clickY = e.clientY - rect.top;
+
+            const xPercent = (clickX / rect.width) * 100;
+            const yPercent = (clickY / rect.height) * 100;
+
+            addMarkerAtPercent(xPercent, yPercent, state.activeCategory, true);
+        });
+
+        function freezeVideoForManualCounting() {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = dom.video.videoWidth;
+            tempCanvas.height = dom.video.videoHeight;
+            tempCanvas.getContext('2d').drawImage(dom.video, 0, 0);
+
+            const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.92);
+            stopCameraStreamOnly();
+            clearCanvas();
+
+            dom.frozenImg.src = dataUrl;
+            state.isFrozen = true;
+
+            dom.video.classList.add('hidden');
+            dom.liveBadge.classList.add('hidden');
+            dom.switchCamBtn.classList.add('hidden');
+            dom.frozenImg.classList.remove('hidden');
+
+            dom.liveControls.classList.add('hidden');
+            dom.frozenControls.classList.remove('hidden');
+        }
+
+        function addMarkerAtPercent(xPercent, yPercent, category, playAudio = true) {
+            state.counts[category]++;
+            const categoryNumber = state.counts[category];
+
+            const marker = {
+                id: Date.now() + Math.random(),
+                xPercent,
+                yPercent,
+                category,
+                number: categoryNumber
+            };
+
+            state.markers.push(marker);
+            renderMarkers();
+            updateCountersUI();
+            if (playAudio) playFeedbackSound('add');
+        }
+
+        function renderMarkers() {
+            dom.markersLayer.innerHTML = '';
+            state.markers.forEach((m) => {
+                const cfg = CATEGORY_CONFIG[m.category];
+                const pin = document.createElement('div');
+                pin.className = `marker-pin absolute w-7 h-7 -translate-x-1/2 -translate-y-1/2 rounded-full ${cfg.colorBg} ${cfg.colorText} font-extrabold text-xs flex items-center justify-center shadow-lg border-2 border-white cursor-pointer select-none`;
+                pin.style.left = `${m.xPercent}%`;
+                pin.style.top = `${m.yPercent}%`;
+                pin.textContent = m.number;
+                pin.title = `${cfg.label} #${m.number} (Toca para eliminar este punto)`;
+
+                // Permitir tocar un punto existente para eliminarlo individualmente
+                pin.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    removeSpecificMarker(m.id);
+                });
+
+                dom.markersLayer.appendChild(pin);
+            });
+        }
+
+        function removeSpecificMarker(markerId) {
+            const index = state.markers.findIndex(m => m.id === markerId);
+            if (index === -1) return;
+
+            const removed = state.markers.splice(index, 1)[0];
+            if (state.counts[removed.category] > 0) {
+                state.counts[removed.category]--;
+            }
+
+            // Renumerar marcadores de esa categoría para mantener orden visual
+            let catCounter = 0;
+            state.markers.forEach(m => {
+                if (m.category === removed.category) {
+                    catCounter++;
+                    m.number = catCounter;
+                }
+            });
+
+            renderMarkers();
+            updateCountersUI();
+            playFeedbackSound('remove');
+        }
+
+        function undoLastMarker() {
+            if (state.markers.length === 0) {
+                showToast('No hay puntos para deshacer');
+                return;
+            }
+            const last = state.markers.pop();
+            if (state.counts[last.category] > 0) {
+                state.counts[last.category]--;
+            }
+            renderMarkers();
+            updateCountersUI();
+            playFeedbackSound('remove');
+        }
+
+        function clearMarkers() {
+            state.markers = [];
+            dom.markersLayer.innerHTML = '';
+        }
+
+        /**
+         * GESTIÓN DE CATEGORÍAS Y CONTADORES MANUALES
+         */
+        function selectCategory(category) {
+            state.activeCategory = category;
+            const cfg = CATEGORY_CONFIG[category];
+
+            // Actualizar estilos de tarjetas
+            document.querySelectorAll('.category-card').forEach(card => {
+                card.classList.remove('border-amber-500', 'border-red-600', 'border-sky-500', 'ring-2', 'ring-offset-1');
+                card.classList.add('border-transparent');
+            });
+
+            const activeCard = document.getElementById(`card-${category}`);
+            activeCard.classList.remove('border-transparent');
+            activeCard.classList.add(cfg.borderColor);
+
+            // Actualizar píldora indicadora
+            dom.activeCategoryPill.textContent = cfg.label;
+            dom.activeCategoryPill.className = `${cfg.colorBg} ${cfg.colorText} px-2.5 py-0.5 rounded-full font-extrabold uppercase text-[10px]`;
+        }
+
+        // Función global llamada por botones + y -
+        window.adjustCount = function(event, category, delta) {
+            event.stopPropagation();
+            selectCategory(category);
+
+            const newVal = state.counts[category] + delta;
+            if (newVal < 0) return;
+
+            state.counts[category] = newVal;
+            
+            // Si se restó manualmente y había un marcador de esa categoría, quitar el último marcador de esa categoría
+            if (delta < 0) {
+                for (let i = state.markers.length - 1; i >= 0; i--) {
+                    if (state.markers[i].category === category) {
+                        state.markers.splice(i, 1);
+                        renderMarkers();
+                        break;
+                    }
+                }
+            }
+
+            updateCountersUI();
+            playFeedbackSound(delta > 0 ? 'add' : 'remove');
+        };
+
+        function updateCountersUI() {
+            dom.countGallinas.textContent = state.counts.gallinas;
+            dom.countGallos.textContent = state.counts.gallos;
+            dom.countPollitos.textContent = state.counts.pollitos;
+
+            const total = state.counts.gallinas + state.counts.gallos + state.counts.pollitos;
+            dom.totalCount.textContent = total;
+        }
+
+        function resetAllCounts() {
+            showConfirm(
+                '¿Reiniciar contadores a 0?',
+                'Se borrarán los números actuales y los marcadores en pantalla.',
+                () => {
+                    state.counts = { gallinas: 0, gallos: 0, pollitos: 0 };
+                    clearMarkers();
+                    updateCountersUI();
+                    showToast('Contadores reiniciados a 0', 'ph-arrow-counter-clockwise text-amber-400');
+                }
+            );
+        }
+
+        /**
+         * CAMBIO DE MODO (IA EN VIVO vs TOQUE PRECISO)
+         */
+        function setMode(newMode) {
+            state.mode = newMode;
+            if (newMode === 'ai') {
+                dom.modeAiBtn.className = 'flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 bg-amber-500 text-slate-950 shadow transition';
+                dom.modeManualBtn.className = 'flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 text-slate-300 hover:text-white transition';
+                
+                if (state.isCameraActive && !state.isFrozen && state.isModelLoaded) {
+                    detectFrameLoop();
+                }
+            } else {
+                dom.modeManualBtn.className = 'flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 bg-amber-500 text-slate-950 shadow transition';
+                dom.modeAiBtn.className = 'flex-1 py-2 px-3 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 text-slate-300 hover:text-white transition';
+                
+                if (state.aiAnimationFrame) {
+                    cancelAnimationFrame(state.aiAnimationFrame);
+                    state.aiAnimationFrame = null;
+                }
+                clearCanvas();
+                if (state.isCameraActive) {
+                    dom.liveBadgeText.textContent = 'EN VIVO • Toca la pantalla para congelar y marcar';
+                }
+            }
+        }
+
+        /**
+         * HISTORIAL Y EXPORTACIÓN (LOCALSTORAGE, CSV, WHATSAPP)
+         */
+        function loadHistory() {
+            try {
+                const saved = localStorage.getItem('agroconteo_history_v1');
+                if (saved) {
+                    state.history = JSON.parse(saved);
+                }
+            } catch (e) {
+                console.error('Error leyendo historial:', e);
+            }
+            renderHistory();
+        }
+
+        function saveHistory() {
+            try {
+                localStorage.setItem('agroconteo_history_v1', JSON.stringify(state.history));
+            } catch (e) {
+                console.error('Error guardando historial:', e);
+            }
+        }
+
+        function saveCurrentRecord() {
+            const total = state.counts.gallinas + state.counts.gallos + state.counts.pollitos;
+            if (total === 0) {
+                showToast('Cuenta al menos un ave antes de guardar.', 'ph-warning text-amber-400');
+                return;
+            }
+
+            const now = new Date();
+            const record = {
+                id: Date.now(),
+                date: now.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' }),
+                time: now.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }),
+                note: dom.recordNote.value.trim() || 'Conteo General',
+                gallinas: state.counts.gallinas,
+                gallos: state.counts.gallos,
+                pollitos: state.counts.pollitos,
+                total: total
+            };
+
+            state.history.unshift(record);
+            saveHistory();
+            renderHistory();
+
+            dom.recordNote.value = '';
+            playFeedbackSound('capture');
+            showToast('¡Registro guardado en el historial!', 'ph-check-circle text-emerald-400');
+        }
+
+        function deleteHistoryItem(id) {
+            showConfirm(
+                '¿Eliminar este registro?',
+                'Se quitará permanentemente de tu historial.',
+                () => {
+                    state.history = state.history.filter(item => item.id !== id);
+                    saveHistory();
+                    renderHistory();
+                    showToast('Registro eliminado', 'ph-trash text-red-400');
+                }
+            );
+        }
+
+        function renderHistory() {
+            if (state.history.length === 0) {
+                dom.historyList.innerHTML = `
+                    <div class="text-center py-6 text-slate-400 text-sm">
+                        Aún no hay conteos guardados.
+                    </div>
+                `;
+                return;
+            }
+
+            dom.historyList.innerHTML = state.history.map(item => `
+                <div class="bg-slate-50 border border-slate-200 rounded-2xl p-3 flex items-center justify-between gap-2">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="font-extrabold text-slate-900 text-sm truncate">${escapeHTML(item.note)}</span>
+                            <span class="text-[11px] font-semibold text-slate-500 bg-slate-200/70 px-2 py-0.5 rounded-full whitespace-nowrap">
+                                ${item.date} • ${item.time}
+                            </span>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2 text-xs font-bold">
+                            <span class="text-amber-700 bg-amber-100 px-2 py-0.5 rounded-lg">🐔 ${item.gallinas}</span>
+                            <span class="text-red-700 bg-red-100 px-2 py-0.5 rounded-lg">🐓 ${item.gallos}</span>
+                            <span class="text-sky-700 bg-sky-100 px-2 py-0.5 rounded-lg">🐤 ${item.pollitos}</span>
+                            <span class="text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-lg font-extrabold">Total: ${item.total}</span>
+                        </div>
+                    </div>
+                    <button onclick="deleteHistoryItem(${item.id})" class="p-2 text-slate-400 hover:text-red-600 rounded-xl transition" title="Eliminar registro">
+                        <i class="ph-bold ph-trash text-lg"></i>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        function escapeHTML(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // Exportar a CSV
+        function exportToCSV() {
+            if (state.history.length === 0) {
+                showToast('No hay registros para exportar.', 'ph-warning text-amber-400');
+                return;
+            }
+
+            const headers = ['Fecha', 'Hora', 'Nota', 'Gallinas', 'Gallos', 'Pollitos', 'Total'];
+            const rows = state.history.map(r => [
+                r.date,
+                r.time,
+                `"${r.note.replace(/"/g, '""')}"`,
+                r.gallinas,
+                r.gallos,
+                r.pollitos,
+                r.total
+            ]);
+
+            const csvContent = '\uFEFF' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `conteo_avicola_${new Date().toISOString().slice(0,10)}.csv`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+
+            showToast('Archivo CSV descargado', 'ph-file-csv text-emerald-400');
+        }
+
+        // Copiar resumen formateado para WhatsApp (usando execCommand para compatibilidad iFrame)
+        function copySummaryForWhatsApp() {
+            const totalActual = state.counts.gallinas + state.counts.gallos + state.counts.pollitos;
+            let textToCopy = '';
+
+            if (totalActual > 0) {
+                const now = new Date();
+                textToCopy = `🐔 *REPORTE DE CONTEO AVÍCOLA*\n📅 ${now.toLocaleDateString('es-MX')} - ${now.toLocaleTimeString('es-MX', {hour: '2-digit', minute:'2-digit'})}\n`;
+                if (dom.recordNote.value.trim()) {
+                    textToCopy += `📍 Lugar: ${dom.recordNote.value.trim()}\n`;
+                }
+                textToCopy += `\n• Gallinas: *${state.counts.gallinas}*\n• Gallos: *${state.counts.gallos}*\n• Pollitos: *${state.counts.pollitos}*\n📊 *TOTAL GENERAL: ${totalActual} aves*`;
+            } else if (state.history.length > 0) {
+                textToCopy = `🐔 *HISTORIAL DE CONTEO AVÍCOLA*\n\n` + state.history.slice(0, 10).map(r => 
+                    `📅 ${r.date} (${r.note}): 🐔${r.gallinas} | 🐓${r.gallos} | 🐤${r.pollitos} -> *Total: ${r.total}*`
+                ).join('\n');
+            } else {
+                showToast('Realiza un conteo o guarda un registro primero.', 'ph-warning text-amber-400');
+                return;
+            }
+
+            const textarea = document.createElement('textarea');
+            textarea.value = textToCopy;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+
+            try {
+                document.execCommand('copy');
+                showToast('¡Resumen copiado! Listo para pegar en WhatsApp.', 'ph-whatsapp-logo text-emerald-400');
+            } catch (err) {
+                showToast('No se pudo copiar el texto.', 'ph-warning text-red-400');
+            }
+            document.body.removeChild(textarea);
+        }
+
+        /**
+         * ASIGNACIÓN DE EVENTOS E INICIALIZACIÓN
+         */
+        window.addEventListener('DOMContentLoaded', () => {
+            // Cargar historial guardado y modelo de IA
+            loadHistory();
+            loadAIModel();
+
+            // Botones de inicio de cámara
+            document.getElementById('start-cam-hero').addEventListener('click', startCamera);
+            document.getElementById('start-cam-bar').addEventListener('click', startCamera);
+            document.getElementById('stop-cam-btn').addEventListener('click', stopCameraCompletely);
+            document.getElementById('switch-cam-btn').addEventListener('click', switchCamera);
+            document.getElementById('resume-cam-btn').addEventListener('click', startCamera);
+
+            // Captura IA y controles de edición
+            document.getElementById('capture-ai-btn').addEventListener('click', captureAndCountAI);
+            document.getElementById('undo-point-btn').addEventListener('click', undoLastMarker);
+            document.getElementById('clear-points-btn').addEventListener('click', () => {
+                clearMarkers();
+                showToast('Marcadores eliminados de la foto', 'ph-eraser text-amber-400');
+            });
+
+            // Subida de imágenes
+            document.getElementById('image-upload').addEventListener('change', handleImageUpload);
+            document.getElementById('image-upload-bar').addEventListener('change', handleImageUpload);
+
+            // Modos IA vs Manual
+            dom.modeAiBtn.addEventListener('click', () => setMode('ai'));
+            dom.modeManualBtn.addEventListener('click', () => setMode('manual'));
+
+            // Selección de tarjetas de categoría
+            document.querySelectorAll('.category-card').forEach(card => {
+                card.addEventListener('click', () => {
+                    selectCategory(card.dataset.category);
+                });
+            });
+
+            // Control de sonido
+            document.getElementById('sound-toggle').addEventListener('click', () => {
+                state.soundEnabled = !state.soundEnabled;
+                const icon = document.getElementById('sound-icon');
+                icon.className = state.soundEnabled ? 'ph-fill ph-speaker-high text-xl' : 'ph-fill ph-speaker-slash text-xl text-slate-500';
+                showToast(state.soundEnabled ? 'Sonido activado' : 'Sonido silenciado');
+            });
+
+            // Guardar, reiniciar y exportar
+            document.getElementById('save-record-btn').addEventListener('click', saveCurrentRecord);
+            document.getElementById('reset-all-btn').addEventListener('click', resetAllCounts);
+            document.getElementById('export-csv-btn').addEventListener('click', exportToCSV);
+            document.getElementById('share-whatsapp-btn').addEventListener('click', copySummaryForWhatsApp);
+
+            // Redimensionar canvas si cambia orientación del teléfono
+            window.addEventListener('resize', resizeCanvas);
+        });
+    </script>
+</body>
+</html>
