@@ -59,6 +59,15 @@
             box-shadow: 0 2px 6px rgba(0,0,0,0.5);
         }
 
+
+        /* Visor amplio: aprovecha casi todo el ancho disponible sin deformar la imagen. */
+        #viewport-container { width: 100%; }
+        #camera-video, #frozen-image, #ai-canvas { backface-visibility: hidden; }
+        #camera-video { object-fit: contain; }
+        @media (max-width: 640px) {
+            #viewport-container { min-height: 56vh; max-height: 72vh; }
+        }
+
         /* Estilos exclusivos de impresión para Reporte Ejecutivo PDF */
         @media print {
             body * {
@@ -243,7 +252,7 @@
     </header>
 
     <!-- CONTENIDO PRINCIPAL POR PESTAÑAS -->
-    <main class="flex-1 max-w-4xl w-full mx-auto p-3 flex flex-col gap-3.5">
+    <main class="flex-1 max-w-screen-2xl w-full mx-auto px-2 sm:px-4 py-3 flex flex-col gap-3.5">
 
         <!-- ===================================================================== -->
         <!-- PESTAÑA 1: CÁMARA IA Y CONTEO EN VIVO                                 -->
@@ -272,7 +281,7 @@
                 </div>
 
                 <!-- Área Visual (Video + Canvas 60FPS + HUD Táctico + Óptica) -->
-                <div id="viewport-container" class="relative w-full aspect-[4/3] sm:aspect-[16/10] bg-[#090d16] flex items-center justify-center overflow-hidden">
+                <div id="viewport-container" class="relative w-full aspect-video min-h-[360px] sm:min-h-[520px] lg:min-h-[650px] max-h-[78vh] bg-[#05080e] flex items-center justify-center overflow-hidden">
                     
                     <!-- HUD Flotante Superior: Conteo Simultáneo + Controles Ópticos -->
                     <div id="simultaneous-hud" class="hidden absolute top-2.5 left-2.5 right-2.5 z-30 flex items-center justify-between gap-1.5 pointer-events-none">
@@ -701,9 +710,9 @@
          * PERFILES DE RENDIMIENTO MÓVIL
          */
         const PERF_PROFILES = {
-            ultra: { sampleWidth: 512, minIntervalMs: 8, label: '512px • Multi-objeto' },
-            balanced: { sampleWidth: 640, minIntervalMs: 16, label: '640px • Multi-objeto' },
-            precision: { sampleWidth: 832, minIntervalMs: 24, label: '832px • Multi-objeto' }
+            ultra: { sampleWidth: 384, minIntervalMs: 70, label: '384px • Fluido' },
+            balanced: { sampleWidth: 512, minIntervalMs: 100, label: '512px • Equilibrado' },
+            precision: { sampleWidth: 640, minIntervalMs: 140, label: '640px • Detallado' }
         };
 
         /**
@@ -1378,7 +1387,12 @@
 
                 dom.offscreenCtx.drawImage(dom.video, sx, sy, sw, sh, 0, 0, offW, offH);
 
-                const birdDetections = await detectBirdsInTiles(dom.offscreenCanvas, state.minConfidence);
+                // Una sola inferencia por fotograma evita cuatro pasadas secuenciales que
+                // saturaban CPU/GPU y provocaban tirones en la vista de cámara.
+                const rawPredictions = await state.model.detect(dom.offscreenCanvas, 100, state.minConfidence);
+                const birdDetections = suppressDuplicateBirds(
+                    rawPredictions.filter(item => item.class === 'bird')
+                );
                 const classified = classifyBirdsFromOffscreen(birdDetections, offW, offH);
 
                 updateTrackerNormalized(classified);
@@ -1955,9 +1969,9 @@
                     audio: false,
                     video: {
                         facingMode: state.facingMode,
-                        width: { ideal: 960, max: 1280 },
-                        height: { ideal: 540, max: 720 },
-                        frameRate: { ideal: 60, min: 30 }
+                        width: { ideal: 1280, max: 1920 },
+                        height: { ideal: 720, max: 1080 },
+                        frameRate: { ideal: 30, max: 30, min: 24 }
                     }
                 });
 
